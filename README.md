@@ -9,6 +9,8 @@ To view a copy of this license, visit http://creativecommons.org/licenses/by/4.0
 GCS_update
 ============================
 
+[![img](https://img.shields.io/badge/Lifecycle-Maturing-007EC6)](https://github.com/bcgov/repomountie/blob/master/doc/lifecycle-badges.md)
+
 ### Usage
 
 This repo houses the R code for processing underlying files for the GeoCoding Selfservice (GCS) shiny app, developed and maintained by BC Stats.
