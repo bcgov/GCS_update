@@ -1,4 +1,12 @@
-.Rproj.user
 .Rhistory
+.Rproj.user
 .RData
 .Ruserdata
+Archive/
+DMTI*
+PCCF*
+Ready_4_Upload/
+Scripts/
+Shapefiles/
+*.txt
+*.Rproj
