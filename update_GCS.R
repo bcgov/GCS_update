@@ -8,24 +8,29 @@ library('sf') # For working with spatial files
 library('stringr') # String manipulation
 library('tictoc') # For timing
 library('doParallel')
+library('here') # for file navigation
 
 ##### 1. Initialisation and declarations #####
 
 # Define variables
-root_source <- '//SFP.IDIR.BCGOV/S152/S52006/'
-DMTI_source <- paste0(root_source, 'GCS/DMTI_Files/DMTI_2018_09/MEP/')
-PCCF_source <- paste0(root_source, 'GCS/PCCF_Files/20180412/PCCF_June2017/National/pccfNat_fccpNat_062017.txt')
-GEOFILES_source <- paste0(root_source, 'GEOFILES/')
-GCS_source <- paste0(root_source, 'GCS/Shapefiles/')
-GCS_output <- paste0(root_source, 'GCS/Ready_4_Upload/')
-GCS_prev_name <- 'GCS_201805.gpkg' # Points to the previous version of GCS
-GCS_curr_name <- 'GCS_201809.gpkg' # Points to the new version of GCS
-# MHA_LHA_list <- c('035','037','201','202') ## MHAs are no longer relevant as of Mar 2018.
+root_source <- ".."  # i.e., L:/ (one folder above project folder)
+DMTI_source <- here("DMTI_Files","DMTI_2020_06","MEP")                                      ## <--- Update with new data. Check each run.
+
+####
+PCCF_source <- here("PCCF_Files","2020_02","PCCF_Feb2020","pccfNat_fccpNat_022020.txt")     ## <--- Update with new data. Check each run.
+####
+
+GEOFILES_source <- here(root_source, "GEOFILES")
+GCS_source <- here("Shapefiles")
+GCS_output <- here("Ready_4_Upload") 
+GCS_prev_name <- 'GCS_202003.gpkg' # Points to the previous version of GCS                  ## <--- Update with new data. Check each run.
+GCS_curr_name <- 'GCS_202006.gpkg' # Points to the new version of GCS                       ## <--- Update with new data. Check each run.
+MHA_LHA_list <- c('035','037','201','202') ## MHAs are no longer relevant as of Mar 2018.
 replacePOSITIONsPCCF <- 4 # Elements in the GCS with these POSITIONs 
                           # are replaced with their PCCF counterpart
 p4s <- '+proj=longlat +datum=WGS84 +no_defs' # EPSG: 4326
 epsg <- 4326
-distance_epsg <- 102002
+distance_epsg <- 3347 # Needs to be a CRS with easting and northing to get centroids
 
 # Identify/register 2 CPUs for processing in parallel
 join_cluster <- makeCluster(2)
@@ -73,11 +78,12 @@ tic('Geocoding postal codes')# Start timer
 # list of postal codes, we read in both sources as a COMBINED source which is 
 # later used in the geocoding.
 DMTI_combined <- read_sf(
-  paste0(DMTI_source, 'BCmep.shp')
+  file.path(DMTI_source, 'BCmep.shp')
 ) %>%
+  mutate(LONGITUDE = HP_LONG, LATITUDE = HP_LAT) %>% 
   rbind(
     read_sf(
-      paste0(DMTI_source, 'BCmep_retired.shp')
+      file.path(DMTI_source, 'BCmep_retired.shp')
     )
   ) %>% 
   filter(SLI == 1) %>%
@@ -89,8 +95,8 @@ DMTI_combined <- read_sf(
          BIRTH_DATE, 
          RET_DATE, 
          LONGITUDE, 
-         LATITUDE, 
-         POSITION
+         LATITUDE,  
+         POSITION   
   ) %>%
   mutate( # Change all text columns to text
     POSTALCODE = as.character(POSTALCODE),
@@ -116,11 +122,12 @@ DMTI_combined %<>% st_set_crs(epsg)
 PCCF <- read_fwf(
   PCCF_source,
   fwf_positions(
-    c(1, 10, 139, 151, 162, 164, 196, 204), # start positions
-    c(6, 11, 150, 161, 162, 192, 203, 210), # end positions
+    c(1, 10, 137, 138, 149, 162, 164, 196, 204), # start positions
+    c(6, 11, 137, 148, 161, 162, 193, 203, 211), # end positions
     c( # column names
       'POSTALCODE',
       'PROV',
+      'REP_POINT',
       'LATITUDE',
       'LONGITUDE',
       'SLI',
@@ -129,7 +136,7 @@ PCCF <- read_fwf(
       'RET_DATE'
     )
   ),
-  col_types = 'ccddiccc' # c = character, d = double, i = integer
+  col_types = 'cciddiccc' # c = character, d = double, i = integer
 ) %>%
   dplyr::filter(
     str_sub(POSTALCODE, 1, 1) == 'V', # Select only BC postal codes
@@ -177,7 +184,8 @@ PCCF %<>% filter(!duplicated(PCCF$POSTALCODE)) # Remove duplicates
 for (replacePOSITION in replacePOSITIONsPCCF) {
   poorQuality <- DMTI_combined %>%
     dplyr::filter(POSITION == replacePOSITION) %>%
-    dplyr::filter(POSTALCODE %in% PCCF$POSTALCODE)
+    dplyr::filter(POSTALCODE %in% PCCF$POSTALCODE[which(PCCF$REP_POINT < 4)])
+  
   DMTI_combined %<>% dplyr::filter(!POSTALCODE %in% poorQuality$POSTALCODE)
   poorQuality %<>% as.data.frame() %>%
     #    dplyr::select(MEP_ID, POSTALCODE) %>%
@@ -231,7 +239,7 @@ PCCF %<>% select(-POSITION)
 
 # Read previous version of GCS
 GCS_prev <- read_sf(
-  paste0(GCS_source, GCS_prev_name)
+  file.path(GCS_source, GCS_prev_name)
 ) %>%
   select(
     MEP_ID, 
@@ -274,6 +282,11 @@ DMTI_combined %<>% rbind(unmatched_pcs) # Add unmatched postal codes
 
 remove(unmatched_pcs, GCS_prev)
 
+# Additional COMM_NAME processing to replace numbers into strings
+# One Hundred Mile House municipality is called 100 Mile House in COMM_NAME, replace with string. 
+# We don't need to replce other COMM_NAME with numbers since there is no equivalent municipality name
+DMTI_combined$COMM_NAME[grep("100 MILE HOUSE", DMTI_combined$COMM_NAME)] <- "ONE HUNDRED MILE HOUSE"
+
 
 ##### 3. Spatial joins with current geographies #####
 
@@ -300,7 +313,11 @@ remove(unmatched_pcs, GCS_prev)
 #    - Census Tract (CT_2016)
 #    - Designated Place (DPL_2016)
 #    - Federal Electoral District (FED_2016)
+#    - Population Centre (POPCTR_2016) *
+#    - Community-Adjusted Municipal Name (COMM_MUN_NAME_2016) *
+#    - Community-Adjusted Census subdivision (COMM_CDCSD_2016) *
 #  - Health
+#    - Community Health Service Area (CHSA) *
 #    - Local Health Area (LHA)
 #    - Health Service Delivery Area (HSDA)
 #    - Health Authority (HA)
@@ -312,7 +329,9 @@ remove(unmatched_pcs, GCS_prev)
 #    - 1999 redistribution (PED_1999)
 #    - 2009 redistribution (PED_2008)
 #    - 2015 redistribution (PED_2015)
-#  - School District (SD)
+#  - Education
+#    - School District (SD)
+#    - Trustee Electoral Area (TEA) *
 #  - College Region (CR)
 #  - Tourism Region (TR)
 #  - Service BC (SBC)
@@ -332,6 +351,59 @@ remove(unmatched_pcs, GCS_prev)
 # in order to ensure correct joining. This prepreparation (identified by the
 # parameter 'prepared = TRUE' within the spatial_join function) also improves 
 # the processing speed of the spatial join.
+
+prepare_sf <- function(x, filter = FALSE) {
+  x %<>% filter(if(filter){PRUID == '59'} else {TRUE}) %>% # filtered to BC (for census data)
+    # Turned warning off: repeating attributes for all sub-geometries for which they may not be constant
+    st_cast('POLYGON', warn = FALSE) %>% # Make singlepart (if multipart)
+    st_transform(epsg) # Project to match postal code geography
+}
+
+## This function is dependent on:
+##  DMTI_combined
+##  HD_point
+##  temp
+update_unmatched_pcs <- function(filter_col, new_cols, temp_cols, filter_exp = NULL){
+  ## Identify unmatched PCs and remove from DMTI_combined
+  if(!is.null(filter_exp)) {
+    ## This is currently valid for MHAs only
+    ungeocoded <- DMTI_combined %>% filter(is.na({{filter_col}}) & {{filter_exp}})
+    DMTI_combined %<>% filter(!(is.na({{filter_col}}) & {{filter_exp}}))
+    
+  } else {
+    ungeocoded <- DMTI_combined %>% filter(is.na({{filter_col}}))
+    DMTI_combined %<>% filter(!is.na({{filter_col}}))
+  }
+  
+  ## Project to match HD Point geography
+  temp %<>% st_transform(crs = st_crs(HD_point)) 
+  ungeocoded %<>% st_transform(crs = st_crs(HD_point)) 
+  
+  ## Join Dissemination Block points to current geography (temp)
+  geo_join <- HD_point %>% 
+    spatial_join(temp)
+   
+  # Remove DBs outside current geography
+  non_join <- lapply(geo_join, length) 
+  geo_join <- geo_join[non_join != 0]
+  HD_point_temp <- HD_point[non_join != 0,]
+  
+  # Find the closest DB to the uncoded Postal Code point
+  closest <- st_distance(ungeocoded, HD_point_temp) %>%
+    apply(1, which.min)
+  
+  # Assign the matched current geog of the closest DB to the uncoded PCs
+  update_col <- function(new_nm, old_nm) {
+    ungeocoded <<- ungeocoded %>% 
+      mutate({{new_nm}} := (temp %>% pull({{old_nm}}))[as.integer(geo_join[closest])])
+  }
+  
+  purrr::walk2(new_cols, temp_cols, update_col)
+
+  # Return the full DMTI_combined with the updated PC geogs
+  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
+    st_set_crs(epsg)
+}
 
 ##### 3.0 Dissemination Block #####
 
@@ -357,67 +429,49 @@ remove(unmatched_pcs, GCS_prev)
 
 print("Processing Dissemination Block...")
 
-HD_point <- read_sf(
-  paste0(GEOFILES_source, 
-         'Census2016/Block/ldb_000b16a_e.shp')) %>% # 2011 Census DA
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  select(DBUID) %>% # Only interested in this data set as a high-definition point file
-  st_centroid() %>% # Extract centroids only (used later in distance calculations)
-  st_transform(distance_epsg) # Project for accurate distance measurement
+db <- read_sf(
+  file.path(GEOFILES_source, 
+         "Census2016","Block","ldb_000b16a_e.shp")) # 2016 Census DB
 
-temp <- read_sf(
-  paste0(GEOFILES_source, 
-         'Census2016/Block/ldb_000b16a_e.shp')) %>% # 2011 Census DA
+HD_point <- db %>% 
   filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  # Turned warning off: repeating attributes for all sub-geometries for which they may not be constant
+  st_cast('POLYGON', warn = FALSE) %>% # Make singlepart (if multipart)
+  select(DBUID) #%>% # Only interested in this data set as a high-definition point file
 
+# explicitly define the attributes as constant throughout the geometry  
+# This is done in prep of st_centroid which would warn it is making this assumption implicitly if not defined
+st_agr(HD_point) <- "constant"
+  
+HD_point %<>%
+  st_transform(distance_epsg) %>% # Project for accurate distance measurement, CRS must have easting/northing axes
+  st_centroid()# %>% # Extract centroids only (used later in distance calculations)
+
+temp <- db %>% # 2016 Census DB
+  prepare_sf(filter = TRUE)
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$DB_2016 <- temp$DBUID[as.integer(geo_join)]
+DMTI_combined %<>% mutate(DB_2016 = temp$DBUID[as.integer(geo_join)])
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  DB_2016 = as.character(DB_2016)
-)
+DMTI_combined %<>% mutate_at(vars(DB_2016), as.character)
 
 # Assign postal codes with DB == NA to the closest DB
-sum(is.na(DMTI_combined$DB_2016))
+if(sum(is.na(DMTI_combined$DB_2016))) {
+  DMTI_combined <- update_unmatched_pcs(DB_2016, quos(DB_2016), quos(DBUID))
+}
 
-ungeocoded <- DMTI_combined %>% filter(is.na(DB_2016))
-DMTI_combined %<>% filter(!is.na(DB_2016))
-temp %<>% st_transform(distance_epsg)
-HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-ungeocoded %<>% st_transform(distance_epsg)
-geo_join <- HD_point_temp %>% 
-  select(DBUID) %>%
-  spatial_join(temp)
-non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-geo_join <- geo_join[non_join != 0]
-HD_point_temp <- HD_point_temp[non_join != 0,]
-
-closest <- st_distance(ungeocoded, HD_point_temp) %>%
-  apply(1, which.min)
-ungeocoded$DB_2016 <- temp$DBUID[as.integer(geo_join[closest])]
-
-# Combine into one source (similar to original)
-DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-  st_set_crs(epsg)
-remove(ungeocoded, closest)
-
+remove(db)
 
 ##### 3.1 Census (2011) #####
 
 print("Processing Census 2011...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source, 
-         'Census2011/DA/gda_000b11a_e.shp')) %>% # 2011 Census DA
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source, 
+         "Census2011","DA","gda_000b11a_e.shp")) %>% # 2011 Census DA
+  prepare_sf(filter = TRUE)
 
 # The DA shape file loaded above contains the following useful geography identifiers:
 # - DAUID (Dissemination Area UID) ~ DA
@@ -429,66 +483,39 @@ temp <- read_sf(
 # - CTUID (Census Tract UID) ~ CT
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$MUN_NAME_2011 <- temp$CSDNAME[as.integer(geo_join)]
-DMTI_combined$CD_2011 <- temp$CDUID[as.integer(geo_join)]
-DMTI_combined$CSD_2011 <- temp$CSDUID[as.integer(geo_join)]
-DMTI_combined$CDCSD_2011 <- DMTI_combined$CSD_2011
-DMTI_combined$CMACA_2011 <- temp$CMAUID[as.integer(geo_join)]
-DMTI_combined$DA_2011 <- temp$DAUID[as.integer(geo_join)]
-DMTI_combined$CT_2011 <- temp$CTNAME[as.integer(geo_join)]
-DMTI_combined$DR_2011 <- temp$ERUID[as.integer(geo_join)]
+DMTI_combined %<>% mutate(
+  MUN_NAME_2011 = temp$CSDNAME[as.integer(geo_join)],
+  CD_2011 = temp$CDUID[as.integer(geo_join)],
+  CSD_2011 = temp$CSDUID[as.integer(geo_join)],
+  CDCSD_2011 = temp$CSDUID[as.integer(geo_join)],
+  CMACA_2011 = temp$CMAUID[as.integer(geo_join)],
+  DA_2011 = temp$DAUID[as.integer(geo_join)],
+  CT_2011 = temp$CTNAME[as.integer(geo_join)],
+  DR_2011 = temp$ERUID[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$DA_2011))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(DA_2011))
-  DMTI_combined %<>% filter(!is.na(DA_2011))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$MUN_NAME_2011 <- temp$CSDNAME[as.integer(geo_join[closest])]
-  ungeocoded$CD_2011 <- temp$CDUID[as.integer(geo_join[closest])]
-  ungeocoded$CSD_2011 <- temp$CSDUID[as.integer(geo_join[closest])]
-  ungeocoded$CDCSD_2011 <- ungeocoded$CSD_2011
-  ungeocoded$CMACA_2011 <- temp$CMAUID[as.integer(geo_join[closest])]
-  ungeocoded$DA_2011 <- temp$DAUID[as.integer(geo_join[closest])]
-  ungeocoded$CT_2011 <- temp$CTNAME[as.integer(geo_join[closest])]
-  ungeocoded$DR_2011 <- temp$ERUID[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(DA_2011, 
+                                        quos(MUN_NAME_2011, CD_2011, CSD_2011, CDCSD_2011, CMACA_2011, DA_2011, CT_2011, DR_2011),
+                                        quos(CSDNAME, CDUID, CSDUID, CSDUID, CMAUID, DAUID, CTNAME, ERUID))
 }
 
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Census2011/DPL/gdpl000b11a_e.shp')) %>% # 2011 Census DPL
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Census2011","DPL","gdpl000b11a_e.shp")) %>% # 2011 Census DPL
+  prepare_sf(filter = TRUE)
 
 # The DA shape file loaded above contains the following useful geography identifiers:
 # - DPLUID (Dissemination Area UID) ~ DPL
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$DPL_2011 <- temp$DPLUID[as.integer(geo_join)]
-
+DMTI_combined %<>% mutate(DPL_2011 = temp$DPLUID[as.integer(geo_join)])
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Census2011/FED/gfed000b11a_e.shp')) %>% # 2011 Census FED
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Census2011","FED","gfed000b11a_e.shp")) %>% # 2011 Census FED
+  prepare_sf(filter = TRUE)
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
@@ -496,50 +523,24 @@ DMTI_combined$FED_2011 <- temp$FEDUID[as.integer(geo_join)]
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$FED_2011))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(FED_2011))
-  DMTI_combined %<>% filter(!is.na(FED_2011))
-  temp %<>% st_transform(distance_epsg)
-  HD_point %<>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  
-  closest <- st_distance(ungeocoded, HD_point) %>%
-    apply(1, which.min)
-  ungeocoded$FED_2011 <- temp$FEDUID[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(FED_2011, 
+                                        quos(FED_2011),
+                                        quos(FEDUID))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  MUN_NAME_2011 = as.character(MUN_NAME_2011),
-  CD_2011       = as.character(CD_2011),
-  CSD_2011      = as.character(CSD_2011),
-  CDCSD_2011    = as.character(CDCSD_2011),
-  CMACA_2011    = as.character(CMACA_2011),
-  DA_2011       = as.character(DA_2011),
-  CT_2011       = as.character(CT_2011),
-  DR_2011       = as.character(DR_2011),
-  DPL_2011      = as.character(DPL_2011),
-  FED_2011      = as.character(FED_2011)
-)
-DMTI_combined_here <- DMTI_combined
-
+DMTI_combined %<>% mutate_at(vars("MUN_NAME_2011", "CD_2011", "CSD_2011", "CDCSD_2011", "CMACA_2011", 
+                                  "DA_2011", "CT_2011", "DR_2011", "DPL_2011", "FED_2011"),
+                             as.character)
 
 ##### 3.2 Census (2016) #####
 
 print("Processing Census 2016...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Census2016/DA/lda_000b16a_e.shp')) %>% # 2016 Census DA
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Census2016","DA","lda_000b16a_e.shp")) %>% # 2016 Census DA
+  prepare_sf(filter = TRUE)
 
 # The DA shape file loaded above contains the following useful geography identifiers:
 # - DAUID (Dissemination Area UID) ~ DA
@@ -551,706 +552,374 @@ temp <- read_sf(
 # - CTUID (Census Tract UID) ~ CT
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$MUN_NAME_2016 <- temp$CSDNAME[as.integer(geo_join)]
-DMTI_combined$CD_2016 <- temp$CDUID[as.integer(geo_join)]
-DMTI_combined$CSD_2016 <- temp$CSDUID[as.integer(geo_join)]
-DMTI_combined$CDCSD_2016 <- DMTI_combined$CSD_2016
-DMTI_combined$CMACA_2016 <- temp$CMAUID[as.integer(geo_join)]
-DMTI_combined$DA_2016 <- temp$DAUID[as.integer(geo_join)]
-DMTI_combined$CT_2016 <- temp$CTNAME[as.integer(geo_join)]
-DMTI_combined$DR_2016 <- temp$ERUID[as.integer(geo_join)]
+DMTI_combined %<>% mutate(
+  MUN_NAME_2016 = temp$CSDNAME[as.integer(geo_join)],
+  CD_2016 = temp$CDUID[as.integer(geo_join)],
+  CSD_2016 = temp$CSDUID[as.integer(geo_join)],
+  CDCSD_2016 = temp$CSDUID[as.integer(geo_join)],
+  CMACA_2016 = temp$CMAUID[as.integer(geo_join)],
+  DA_2016 = temp$DAUID[as.integer(geo_join)],
+  CT_2016 = temp$CTNAME[as.integer(geo_join)],
+  DR_2016 = temp$ERUID[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$DA_2016))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(DA_2016))
-  DMTI_combined %<>% filter(!is.na(DA_2016))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$MUN_NAME_2016 <- temp$CSDNAME[as.integer(geo_join[closest])]
-  ungeocoded$CD_2016 <- temp$CDUID[as.integer(geo_join[closest])]
-  ungeocoded$CSD_2016 <- temp$CSDUID[as.integer(geo_join[closest])]
-  ungeocoded$CDCSD_2016 <- ungeocoded$CSD_2016
-  ungeocoded$CMACA_2016 <- temp$CMAUID[as.integer(geo_join[closest])]
-  ungeocoded$DA_2016 <- temp$DAUID[as.integer(geo_join[closest])]
-  ungeocoded$CT_2016 <- temp$CTNAME[as.integer(geo_join[closest])]
-  ungeocoded$DR_2016 <- temp$ERUID[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(DA_2016, 
+                                        quos(MUN_NAME_2016, CD_2016, CSD_2016, CDCSD_2016, CMACA_2016, DA_2016, CT_2016, DR_2016),
+                                        quos(CSDNAME, CDUID, CSDUID, CSDUID, CMAUID, DAUID, CTNAME, ERUID))
 }
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Census2016/DPL/ldpl000b16a_e.shp')) %>% # 2016 Census DPL
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Census2016","DPL","ldpl000b16a_e.shp")) %>% # 2016 Census DPL
+  prepare_sf(filter = TRUE)
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$DPL_2016 <- temp$DPLUID[as.integer(geo_join)]
-
+DMTI_combined %<>% mutate(DPL_2016 = temp$DPLUID[as.integer(geo_join)])
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Census2016/FED/lfed000b16a_e.shp')) %>% # 2016 Census FED
-  filter(PRUID == '59') %>% # filtered to BC
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Census2016","FED","lfed000b16a_e.shp")) %>% # 2016 Census FED
+  prepare_sf(filter = TRUE)
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$FED_2016 <- temp$FEDUID[as.integer(geo_join)]
+DMTI_combined %<>% mutate(FED_2016 = temp$FEDUID[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$FED_2016))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(FED_2016))
-  DMTI_combined %<>% filter(!is.na(FED_2016))
-  temp %<>% st_transform(distance_epsg)
-  HD_point %<>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  
-  closest <- st_distance(ungeocoded, HD_point) %>%
-    apply(1, which.min)
-  ungeocoded$FED_2016 <- temp$FEDUID[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(FED_2016, 
+                                        quos(FED_2016),
+                                        quos(FEDUID))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  MUN_NAME_2016 = as.character(MUN_NAME_2016),
-  CD_2016       = as.character(CD_2016),
-  CSD_2016      = as.character(CSD_2016),
-  CDCSD_2016    = as.character(CDCSD_2016),
-  CMACA_2016    = as.character(CMACA_2016),
-  DA_2016       = as.character(DA_2016),
-  CT_2016       = as.character(CT_2016),
-  DR_2016       = as.character(DR_2016),
-  DPL_2016      = as.character(DPL_2016),
-  FED_2016      = as.character(FED_2016)
-)
+DMTI_combined %<>% mutate_at(vars("MUN_NAME_2016", "CD_2016", "CSD_2016", "CDCSD_2016", "CMACA_2016",
+                                  "DA_2016", "CT_2016", "DR_2016", "DPL_2016", "FED_2016"),
+                             as.character)
 
-##### 3.3 Ministry of Health #####
+## Population Centre
 
-print("Processing CHSA...")
-
-temp <- read_sf('//SFP.IDIR.BCGOV/S152/S52006/GCS/BCCDC_Project/GCS_BCCDC/CHSA_2017_v1.1/CHSA_2017_v1.1.shp') %>% # Community Health service Area (CHSA)
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
-
-geo_join <- DMTI_combined %>% spatial_join(temp)
-
-DMTI_combined$CHSA <- temp$CHSA_id[as.integer(geo_join)]
-DMTI_combined$LHA <- temp$LHA_id[as.integer(geo_join)]
-DMTI_combined$HSDA <- temp$HSDA_id[as.integer(geo_join)]
-DMTI_combined$HA <- temp$HA_id[as.integer(geo_join)]
-
-
-# Identify and update unmatched postal codes
-if (sum(is.na(DMTI_combined$CHSA))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(CHSA))
-  DMTI_combined %<>% filter(!is.na(CHSA))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$CHSA <- temp$CHSA_id[as.integer(geo_join[closest])]
-  ungeocoded$LHA <- temp$LHA_id[as.integer(geo_join[closest])]
-  ungeocoded$HSDA <- temp$HSDA_id[as.integer(geo_join[closest])]
-  ungeocoded$HA <- temp$HA_id[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
-}
-
-
-## (old) 2013 LHA areas (new LHAs were implemented when the CHSA were introduced in 2018-02)
-
-print("Processing 2013 LHA...")
+print("Processing Population Centres...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source, 
-         'Health/Data/LHA_2013.shp')) %>% # 2011 Census DA
-  st_cast('POLYGON') %>% # Make singlepart (if multipart)
-  st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Census2016","PopulationCentre","lpc_000b16a_e.shp")) %>% # Popukation centre
+  prepare_sf(filter = TRUE)
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$LHA_PRE_2018  <- temp$LHA[as.integer(geo_join)]
+DMTI_combined %<>% mutate(POPCTR_2016 = temp$PCUID[as.integer(geo_join)])
 
-
-# Identify and update unmatched postal codes
-if (sum(is.na(DMTI_combined$LHA_PRE_2018))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(LHA_PRE_2018))
-  DMTI_combined %<>% filter(!is.na(LHA_PRE_2018))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$LHA_PRE_2018 <- temp$LHA[as.integer(geo_join[closest])]
-  
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
-}
-
-## MHAs are no longer relevant as of Mar 2018.
-# temp <- read_sf(
-#   paste0(GEOFILES_source,
-#         'Health/Data/MHA_2013.shp')) %>% # Micro Health Area (MHA)
-#   st_cast('POLYGON') %>% # Make singlepart (if multipart)
-#   st_transform(epsg) # Project to match postal code geography
-# 
-# geo_join <- DMTI_combined %>% spatial_join(temp)
-# 
-# DMTI_combined$MHA <- temp$MHA[as.integer(geo_join)]
-# 
-# # Identify and update unmatched postal codes
-# # First try buffering
-# 
-# # Now try closest centroid
-# if (sum(is.na(DMTI_combined$MHA) & 
-#         (DMTI_combined$LHA %in% MHA_LHA_list))) {
-#   ungeocoded <- DMTI_combined %>% filter(is.na(MHA) & 
-#                                            (DMTI_combined$LHA %in% MHA_LHA_list))
-#   DMTI_combined %<>% filter(!(is.na(MHA) &
-#                                 (DMTI_combined$LHA %in% MHA_LHA_list)))
-#   temp %<>% st_transform(distance_epsg)
-#   HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-#   ungeocoded %<>% st_transform(distance_epsg)
-#   geo_join <- HD_point_temp %>% 
-#     select(DBUID) %>%
-#     spatial_join(temp)
-#   non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-#   geo_join <- geo_join[non_join != 0]
-#   HD_point_temp <- HD_point_temp[non_join != 0,]
-#   
-#   closest <- st_distance(ungeocoded, HD_point_temp) %>%
-#     apply(1, which.min)
-#   ungeocoded$MHA <- temp$MHA[as.integer(geo_join[closest])]
-#   # Combine into one source (similar to original)
-#   DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-#     st_set_crs(epsg)
-#   remove(ungeocoded, closest)
-# }
+# Don't need to update unmatched PC - they are ok, that means that the postal code is not in a Pop centre but is Rural
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  CHSA  = as.character(CHSA),
-  LHA  = as.character(LHA),
-  HSDA = as.character(HSDA),
-  HA   = as.character(HA)
-  # MHA  = as.character(MHA)
-)
+DMTI_combined %<>% mutate_at(vars(POPCTR_2016), as.character)
 
+##### 3.3 Ministry of Health #####
+# The Ministry of Health as asked us to geocode Community Health service Areas (CHSA) from DBs based on the DB-CHSA crosswalk. 
+# DBs are already coded earlier in DMTI_combined, so we match them from the crosswalk
+# Instead of reading in from 'L:/GEOFILES/Health/Data/Health boundaries 2019/Final/CHSA_2018/CHSA_2018.shp'
+print("Processing CHSA...")
+
+chsa_crosswalk <- read.csv('L:/GEOFILES/Health/Data/Health boundaries 2019/Final/DB-CHSA_2018.csv', stringsAsFactors = FALSE) %>%
+  rename(DB_2016 = DBuid, CHSA = CHSA_CD, LHA1997 = LHA) %>%
+  mutate(DB_2016 = as.character(DB_2016), CHSA = as.character(CHSA), LHA1997 = str_pad(as.character(LHA1997), 3, pad = "0"))
+
+DMTI_combined %<>% 
+  left_join(chsa_crosswalk %>% select(DB_2016, CHSA), by = "DB_2016") %>%
+  mutate(
+    LHA = substr(CHSA, 1, 3),  
+    HSDA = substr(CHSA, 1, 2), 
+    HA = substr(CHSA, 1, 1)) 
+
+## (old) 2013 LHA areas (new LHAs were implemented when the CHSA were introduced in 2018-02)
+## Also now matched using CHSA crosswalk instead of reading in from 'L:/GEOFILES/Health/Data/LHA_2013.shp'
+
+print("Processing Pre 2018 LHA...")
+
+DMTI_combined %<>% mutate(LHA_PRE_2018 = (DMTI_combined %>% left_join(chsa_crosswalk, by = "DB_2016"))$LHA1997)
+
+## (old) MHAs are no longer relevant as of Mar 2018
+temp <- read_sf(
+  file.path(GEOFILES_source,
+        "Health","Data","MHA_2013.shp")) %>% # Micro Health Area (MHA)
+  prepare_sf()
+
+geo_join <- DMTI_combined %>% spatial_join(temp)
+
+DMTI_combined %<>% mutate(MHA = temp$MHA[as.integer(geo_join)])
+
+# Identify and update unmatched postal codes
+if (sum(is.na(DMTI_combined$MHA) &
+        (DMTI_combined$LHA_PRE_2018 %in% MHA_LHA_list))) {
+  DMTI_combined <- update_unmatched_pcs(MHA,
+                                        quos(MHA),
+                                        quos(MHA),
+                                        DMTI_combined$LHA_PRE_2018 %in% MHA_LHA_list)
+}
+
+# Change all text columns to text
+DMTI_combined %<>% mutate_at(vars("CHSA", "LHA", "HSDA", "HA", "MHA"), as.character)
+
+remove(chsa_crosswalk)
 
 ##### 3.4 Ministry of Children and Families Districts (MCFD) #####
 
 print("Processing MCFD...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'MCFD/Data/MCFD_LSA_2016.shp')) %>% # MCFD Local Service Area (LSA)
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "MCFD","Data","MCFD_LSA_2016.shp")) %>% # MCFD Local Service Area (LSA)
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$MCFD_LSA <- temp$LSA[as.integer(geo_join)]
-DMTI_combined$MCFD_SDA <- temp$SDA_NUM[as.integer(geo_join)]
-DMTI_combined$MCFD <- temp$MCFD_NUM[as.integer(geo_join)]
-
-DMTI_combined_here <- DMTI_combined
+DMTI_combined %<>% mutate(
+  MCFD_LSA = temp$LSA[as.integer(geo_join)],
+  MCFD_SDA = temp$SDA_NUM[as.integer(geo_join)],
+  MCFD = temp$MCFD_NUM[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$MCFD))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(MCFD))
-  DMTI_combined %<>% filter(!is.na(MCFD))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$MCFD_LSA <- temp$LSA[as.integer(geo_join[closest])]
-  ungeocoded$MCFD_SDA <- temp$SDA_NUM[as.integer(geo_join[closest])]
-  ungeocoded$MCFD <- temp$MCFD_NUM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(MCFD,
+                                        quos(MCFD_LSA, MCFD_SDA, MCFD),
+                                        quos(LSA, SDA_NUM, MCFD_NUM))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  MCFD_LSA = as.character(MCFD_LSA),
-  MCFD_SDA = as.character(MCFD_SDA),
-  MCFD     = as.character(MCFD)
-)
-
+DMTI_combined %<>% mutate_at(vars("MCFD_LSA", "MCFD_SDA", "MCFD"), as.character)
 
 ##### 3.5 Provincial Electoral Districts (PED) #####
 
 print("Processing PED...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'PED/Data/PED_1999.shp')) %>% # Provincial Electoral District (PED) 1999 Redistribution
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "PED","Data","PED_1999.shp")) %>% # Provincial Electoral District (PED) 1999 Redistribution
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$PED_1999 <- temp$PED_N[as.integer(lapply(geo_join, first))]
+DMTI_combined %<>% mutate(PED_1999 = temp$PED_N[as.integer(lapply(geo_join, first))])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$PED_1999))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(PED_1999))
-  DMTI_combined %<>% filter(!is.na(PED_1999))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join !=0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$PED_1999 <- temp$PED_N[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(PED_1999,
+                                        quos(PED_1999),
+                                        quos(PED_N))
 }
 
-
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'PED/Data/PED_2008.shp')) %>% # Provincial Electoral District (PED) 2009 Redistribution
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "PED","Data","PED_2008.shp")) %>% # Provincial Electoral District (PED) 2009 Redistribution
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$PED_2009 <- temp$PED_NUM08[as.integer(geo_join)]
+DMTI_combined %<>% mutate(PED_2009 = temp$PED_NUM08[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$PED_2009))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(PED_2009))
-  DMTI_combined %<>% filter(!is.na(PED_2009))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join !=0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$PED_2009 <- temp$PED_NUM08[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(PED_2009,
+                                        quos(PED_2009),
+                                        quos(PED_NUM08))
 }
 
-
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'PED/Data/PED_2015.shp')) %>% # Provincial Electoral District (PED) 2015 Redistribution
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "PED","Data","PED_2015.shp")) %>% # Provincial Electoral District (PED) 2015 Redistribution
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$PED_2015 <- temp$PED15_NUM[as.integer(geo_join)]
+DMTI_combined %<>% mutate(PED_2015 = temp$PED15_NUM[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$PED_2015))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(PED_2015))
-  DMTI_combined %<>% filter(!is.na(PED_2015))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$PED_2015 <- temp$PED15_NUM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(PED_2015,
+                                        quos(PED_2015),
+                                        quos(PED15_NUM))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  PED_1999 = as.character(PED_1999),
-  PED_2009 = as.character(PED_2009),
-  PED_2015 = as.character(PED_2015)
-)
+DMTI_combined %<>% mutate_at(vars("PED_1999", "PED_2009", "PED_2015"), as.character)
 
+##### 3.6 Trustee Electoral Areas (TEA) and School Districts (SD) #####
+## Trustee Elecotral Areas (TEA)
+## No longer get School Disctricts from 'L:/GEOFILES/School_District/Data/SD_2008.shp'
+## now we just take the first 2 character from TEA so they line up.
 
-##### 3.6 School Districts (SD) #####
+print("Processing Trustee Electoral Areas and School Districts...")
 
-print("Processing School Districts...")
-
+## TEAs
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'School_District/Data/SD_2008.shp')) %>% # School District
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source, "School_District","Data","TEA_20190312.shp")) %>% # Trustee Electoral Areas
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$SD <- temp$SDNUM[as.integer(lapply(geo_join, first))]
+DMTI_combined %<>% mutate(TEA = temp$SDTEAUID[as.integer(lapply(geo_join, first))])
 
 # Identify and update unmatched postal codes
-if (sum(is.na(DMTI_combined$SD))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(SD))
-  DMTI_combined %<>% filter(!is.na(SD))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$SD <- temp$SDNUM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+if (sum(is.na(DMTI_combined$TEA))) {
+  DMTI_combined <- update_unmatched_pcs(TEA,
+                                        quos(TEA),
+                                        quos(SDTEAUID))
 }
 
-# Change all text columns to text
-DMTI_combined %<>% mutate(
-  SD = as.character(SD)
-)
+## SDs
+DMTI_combined$SD <- substr(DMTI_combined$TEA, 1, 2)
 
+# Change all text columns to text
+DMTI_combined %<>% mutate_at(vars("TEA", "SD"), as.character)
 
 ##### 3.7 College Regions (CR) #####
 
 print("Processing College Region...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'CollegeRegion/Data/CR_2012.shp')) %>% # College Region
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "CollegeRegion","Data","CR_2012.shp")) %>% # College Region
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$CR <- temp$CR_NUM[as.integer(geo_join)]
+DMTI_combined %<>% mutate(CR = temp$CR_NUM[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$CR))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(CR))
-  DMTI_combined %<>% filter(!is.na(CR))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$CR <- temp$CR_NUM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(CR,
+                                        quos(CR),
+                                        quos(CR_NUM))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  CR = as.character(CR)
-)
-
+DMTI_combined %<>% mutate_at(vars("CR"), as.character)
 
 ##### 3.8 Tourism Regions #####
 
 print("Processing Tourism Regions...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Tourism/Data/Tourism_2012.shp')) %>% # Tourism Regions
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Tourism","Data","Tourism_2012.shp")) %>% # Tourism Regions
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$TOURISM <- temp$TOURISM[as.integer(geo_join)]
+DMTI_combined %<>% mutate(TOURISM = temp$TOURISM[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$TOURISM))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(TOURISM))
-  DMTI_combined %<>% filter(!is.na(TOURISM))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$TOURISM <- temp$TOURISM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(TOURISM,
+                                        quos(TOURISM),
+                                        quos(TOURISM))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  TOURISM = as.character(TOURISM)
-)
-
+DMTI_combined %<>% mutate_at(vars("TOURISM"), as.character)
 
 ##### 3.9 Service BC Regions (SBC) #####
 
 print("Processing Service BC Regions...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'ServiceBC/Data/service_bc_2011.shp')) %>% # Service BC Regions
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "ServiceBC","Data","service_bc_2011.shp")) %>% # Service BC Regions
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$SBC <- as.character(temp$SBC_NUM[as.integer(geo_join)])
+DMTI_combined %<>% mutate(SBC = as.character(temp$SBC_NUM[as.integer(geo_join)]))
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$SBC))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(SBC))
-  DMTI_combined %<>% filter(!is.na(SBC))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$SBC <- temp$SBC_NUM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(SBC,
+                                        quos(SBC),
+                                        quos(SBC_NUM))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  SBC = as.character(SBC)
-)
-
+DMTI_combined %<>% mutate_at(vars("SBC"), as.character)
 
 ##### 3.10 RCMP Respondent Code Areas #####
 
 print("Processing RCMP areas...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Police/Data/Resp_Codes_Cartographic2014.shp')) %>% # RCMP Resp
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Police","Data","Resp_Codes_Cartographic2014.shp")) %>% # RCMP Resp
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$RESP <- temp$RESP[as.integer(geo_join)]
+DMTI_combined %<>% mutate(RESP = temp$RESP[as.integer(geo_join)])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$RESP))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(RESP))
-  DMTI_combined %<>% filter(!is.na(RESP))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join !=0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$RESP <- temp$RESP[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(RESP,
+                                        quos(RESP),
+                                        quos(RESP))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  RESP = as.character(RESP)
-)
-
+DMTI_combined %<>% mutate_at(vars("RESP"), as.character)
 
 ##### 3.11 Timber Supply Areas (TSA) #####
 
 print("Processing Timber Supply Area...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'TSA/Data/BC_TSA_2017.shp')) %>% # Timber Supply Areas
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "TSA","Data","BC_TSA_2017.shp")) %>% # Timber Supply Areas
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$TSA <- temp$TSA_NUMBER[as.integer(lapply(geo_join, first))]
+DMTI_combined %<>% mutate(TSA = temp$TSA_NUMBER[as.integer(lapply(geo_join, first))])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$TSA))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(TSA))
-  DMTI_combined %<>% filter(!is.na(TSA))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$TSA <- temp$TSA_NUMBER[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(TSA,
+                                        quos(TSA),
+                                        quos(TSA_NUMBER))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  TSA = as.character(TSA)
-)
-
+DMTI_combined %<>% mutate_at(vars("TSA"), as.character)
 
 ##### 3.12 Games Zones (GZ) #####
 
 print("Processing Games Zones...")
 
 temp <- read_sf(
-  paste0(GEOFILES_source,
-         'Games_Zones/Data/BC_Games_Zones.shp')) %>% # BC Games Zones 
-  st_cast('POLYGON') # Make singlepart (if multipart)
-temp %<>% st_transform(epsg) # Project to match postal code geography
+  file.path(GEOFILES_source,
+         "Games_Zones","Data","BC_Games_Zones.shp")) %>% # BC Games Zones 
+  prepare_sf()
 
 geo_join <- DMTI_combined %>% spatial_join(temp)
 
-DMTI_combined$GZ <- temp$ZONE_NUM[as.integer(lapply(geo_join, first))]
+DMTI_combined %<>% mutate(GZ = temp$ZONE_NUM[as.integer(lapply(geo_join, first))])
 
 # Identify and update unmatched postal codes
 if (sum(is.na(DMTI_combined$GZ))) {
-  ungeocoded <- DMTI_combined %>% filter(is.na(GZ))
-  DMTI_combined %<>% filter(!is.na(GZ))
-  temp %<>% st_transform(distance_epsg)
-  HD_point_temp <- HD_point %>% st_transform(distance_epsg)
-  ungeocoded %<>% st_transform(distance_epsg)
-  geo_join <- HD_point_temp %>% 
-    select(DBUID) %>%
-    spatial_join(temp)
-  non_join <- lapply(geo_join, length) # Identify DBs outside current geography
-  geo_join <- geo_join[non_join != 0]
-  HD_point_temp <- HD_point_temp[non_join != 0,]
-  
-  closest <- st_distance(ungeocoded, HD_point_temp) %>%
-    apply(1, which.min)
-  ungeocoded$GZ <- temp$ZONE_NUM[as.integer(geo_join[closest])]
-  # Combine into one source (similar to original)
-  DMTI_combined %<>% rbind(ungeocoded %>% st_transform(epsg)) %>%
-    st_set_crs(epsg)
-  remove(ungeocoded, closest)
+  DMTI_combined <- update_unmatched_pcs(GZ,
+                                        quos(GZ),
+                                        quos(GZ_NUM))
 }
 
 # Change all text columns to text
-DMTI_combined %<>% mutate(
-  GZ = as.character(GZ)
-)
-
+DMTI_combined %<>% mutate_at(vars("GZ"), as.character)
 
 ##### 3.Z End of spatial joins #####
 
 toc()# Stop timer
 
 stopCluster(join_cluster)
-remove(geo_join, temp, join_cluster, distance_epsg, p4s, HD_point,
-       HD_point_temp, non_join)
+
+remove(geo_join, temp, join_cluster, distance_epsg, p4s, HD_point)
 
 
 ##### 4. Fix census-related SGCs and pad with zeroes #####
@@ -1289,18 +958,19 @@ DMTI_combined %<>% mutate(
 
 print("Preparing final output...")
 
-# Update PROV and ACTIVE fields
 DMTI_combined %<>% 
+  # Update PROV and ACTIVE fields  
   mutate(PROV = 'BC') %>%
-  mutate(ACTIVE = ifelse(RET_DATE == '19000001', 'Y', 'N'))
-# Update Longitude and Latitude fields using geometry field
-DMTI_combined$LONGITUDE <- unlist(lapply(DMTI_combined$geometry, first))
-DMTI_combined$LATITUDE <- unlist(lapply(DMTI_combined$geometry, last))
+  mutate(ACTIVE = ifelse(RET_DATE == '19000001', 'Y', 'N'),
+  # Update Longitude and Latitude fields using geometry field
+  LONGITUDE = unlist(lapply(DMTI_combined$geometry, first)),
+  LATITUDE = unlist(lapply(DMTI_combined$geometry, last)))
+
 # Fix all NAs to be <blank>
 DMTI_combined[is.na(DMTI_combined)] <- ''
+
 # Sort data alphanumerically based on POSTALCODE
 DMTI_combined %<>% arrange(POSTALCODE)
-
 
 ##### 6. Write GCS output #####
 
@@ -1320,37 +990,40 @@ if (!dir.exists('C:/Temp/')) {
 # Write geocoded postal codes to .gpkg format
 st_write(
   obj = DMTI_combined,
-  dsn = 'C:/Temp/temp.gpkg',
+  dsn = file.path('C:','Temp','temp.gpkg'),
   layer = str_replace(GCS_curr_name, '.gpkg', ''),
   factorsAsCharacter = TRUE
 )
 temp <- file.copy(
-  'C:/Temp/temp.gpkg',
-  paste0(GCS_source, GCS_curr_name),
+  file.path('C:','Temp','temp.gpkg'),
+  file.path(GCS_source, GCS_curr_name),
   copy.mode = TRUE,
   copy.date = FALSE,
   overwrite = TRUE
 )
 if (temp) {
-  file.remove('C:/Temp/temp.gpkg')
+  file.remove(file.path('C:','Temp','temp.gpkg'))
 }
 
-# Write geocoded postal code data to .csv
+# Write geocoded postal code data to .csv and .rds
 write.csv(
   as.data.frame(DMTI_combined) %>% select(-geometry),
-  file = 'C:/Temp/temp.csv',
+  file = file.path('C:','Temp','temp.csv'),
   row.names = FALSE,
   quote = TRUE # ...this ensures that zero-padding is properly saved
 )
 temp <- file.copy(
-  'C:/Temp/temp.csv',
-  paste0(GCS_output, str_replace(GCS_curr_name, '.gpkg', '.csv')),
+  file.path('C:','Temp','temp.csv'),
+  file.path(GCS_output, str_replace(GCS_curr_name, '.gpkg', '.csv')),
   copy.mode = TRUE,
   copy.date = FALSE,
   overwrite = TRUE
 )
+saveRDS(as.data.frame(DMTI_combined) %>% select(-geometry),
+        file = file.path(GCS_output, str_replace(GCS_curr_name, '.gpkg', '.rds'))
+)
 if (temp) {
-  temp <- file.remove('C:/Temp/temp.csv')
+  temp <- file.remove(file.path('C:','Temp','temp.csv'))
 }
 
 ##### 7. Clean workspace #####
@@ -1362,10 +1035,12 @@ remove(
   GCS_source, GEOFILES_source, GCS_output,
   GCS_curr_name, GCS_prev_name,
   DMTI_source,
-  PCCF_source,# PCCF,
+  PCCF_source,
   root_source,
   MHA_LHA_list,
-  spatial_join
+  spatial_join,
+  prepare_sf,
+  update_unmatched_pcs
 )
 
 print("Done...")
