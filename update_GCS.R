@@ -14,17 +14,17 @@ library('here') # for file navigation
 
 # Define variables
 root_source <- ".."  # i.e., L:/ (one folder above project folder)
-DMTI_source <- here("DMTI_Files","DMTI_2020_06","MEP")                                      ## <--- Update with new data. Check each run.
+DMTI_source <- here("DMTI_Files","DMTI_2021_01","MEP")                                      ## <--- Update with new data. Check each run.
 
 ####
-PCCF_source <- here("PCCF_Files","2020_02","PCCF_Feb2020","pccfNat_fccpNat_022020.txt")     ## <--- Update with new data. Check each run.
+PCCF_source <- here("PCCF_Files","2020_11","PCCF_Nov2020","pccfNat_fccpNat_112020.txt")     ## <--- Update with new data. Check each run.
 ####
 
 GEOFILES_source <- here(root_source, "GEOFILES")
 GCS_source <- here("Shapefiles")
 GCS_output <- here("Ready_4_Upload") 
-GCS_prev_name <- 'GCS_202003.gpkg' # Points to the previous version of GCS                  ## <--- Update with new data. Check each run.
-GCS_curr_name <- 'GCS_202006.gpkg' # Points to the new version of GCS                       ## <--- Update with new data. Check each run.
+GCS_prev_name <- 'GCS_202009.gpkg' # Points to the previous version of GCS                  ## <--- Update with new data. Check each run.
+GCS_curr_name <- 'GCS_202101.gpkg' # Points to the new version of GCS                       ## <--- Update with new data. Check each run.
 MHA_LHA_list <- c('035','037','201','202') ## MHAs are no longer relevant as of Mar 2018.
 replacePOSITIONsPCCF <- 4 # Elements in the GCS with these POSITIONs 
                           # are replaced with their PCCF counterpart
