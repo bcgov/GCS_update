@@ -9,7 +9,9 @@ To view a copy of this license, visit http://creativecommons.org/licenses/by/4.0
 GCS_update
 ============================
 
-[![img](https://img.shields.io/badge/Lifecycle-Maturing-007EC6)](https://github.com/bcgov/repomountie/blob/master/doc/lifecycle-badges.md)
+![img](https://img.shields.io/badge/Lifecycle-Dormant-ff7f2a)
+[![status: archive](https://github.com/GIScience/badges/raw/master/status/archive.svg)](https://github.com/GIScience/badges#archive)
+
 
 ### Usage
 
